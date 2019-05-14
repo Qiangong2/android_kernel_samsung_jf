@@ -179,6 +179,7 @@ ENTRY(msm_pm_collapse)
 	mov	r2, #1
 	and	r1, r2, r1, ASR #30 /* Check if the cache is write back */
 	orr	r1, r0, r1
+	and	r1, r1, #1
 	cmp	r1, #1
 	bne	skip
 	bl	v7_flush_dcache_all
@@ -223,7 +224,7 @@ skip_pc_debug1:
 	SUSPEND_8x25_L2
 	SET_SMP_COHERENCY OFF
 	wfi
-	DELAY_8x25 300
+	DELAY 300
 
 	mcr     p15, 0, r4, c1, c0, 0    /* restore d/i cache  */
 	isb

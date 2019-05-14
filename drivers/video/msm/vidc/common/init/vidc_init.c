@@ -24,7 +24,7 @@
 #include <linux/uaccess.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
-#include <linux/android_pmem.h>
+
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/debugfs.h>
@@ -49,7 +49,6 @@
 static struct vidc_dev *vidc_device_p;
 static dev_t vidc_dev_num;
 static struct class *vidc_class;
-static unsigned int vidc_mmu_subsystem[] = {MSM_SUBSYSTEM_VIDEO};
 
 static const struct file_operations vidc_fops = {
 	.owner = THIS_MODULE,
@@ -580,7 +579,7 @@ u32 vidc_lookup_addr_table(struct video_client_ctx *client_ctx,
 			if (*user_vaddr == buf_addr_table[i].user_vaddr) {
 				*kernel_vaddr = buf_addr_table[i].kernel_vaddr;
 				found = true;
-				DBG("%s() : client_ctx = %p."
+				DBG("%s() : client_ctx = %pK."
 				" user_virt_addr = 0x%08lx is found",
 				__func__, client_ctx, *user_vaddr);
 				break;
@@ -589,7 +588,7 @@ u32 vidc_lookup_addr_table(struct video_client_ctx *client_ctx,
 			if (*kernel_vaddr == buf_addr_table[i].kernel_vaddr) {
 				*user_vaddr = buf_addr_table[i].user_vaddr;
 				found = true;
-				DBG("%s() : client_ctx = %p."
+				DBG("%s() : client_ctx = %pK."
 				" kernel_virt_addr = 0x%08lx is found",
 				__func__, client_ctx, *kernel_vaddr);
 				break;
@@ -605,22 +604,22 @@ u32 vidc_lookup_addr_table(struct video_client_ctx *client_ctx,
 
 		if (search_with_user_vaddr)
 			DBG("kernel_vaddr = 0x%08lx, phy_addr = 0x%08lx "
-			" pmem_fd = %d, struct *file	= %p "
+			" pmem_fd = %d, struct *file	= %pK "
 			"buffer_index = %d\n", *kernel_vaddr,
 			*phy_addr, *pmem_fd, *file, *buffer_index);
 		else
 			DBG("user_vaddr = 0x%08lx, phy_addr = 0x%08lx "
-			" pmem_fd = %d, struct *file	= %p "
+			" pmem_fd = %d, struct *file	= %pK "
 			"buffer_index = %d\n", *user_vaddr, *phy_addr,
 			*pmem_fd, *file, *buffer_index);
 		mutex_unlock(&client_ctx->enrty_queue_lock);
 		return true;
 	} else {
 		if (search_with_user_vaddr)
-			DBG("%s() : client_ctx = %p user_virt_addr = 0x%08lx"
+			DBG("%s() : client_ctx = %pK user_virt_addr = 0x%08lx"
 			" Not Found.\n", __func__, client_ctx, *user_vaddr);
 		else
-			DBG("%s() : client_ctx = %p kernel_virt_addr = 0x%08lx"
+			DBG("%s() : client_ctx = %pK kernel_virt_addr = 0x%08lx"
 			" Not Found.\n", __func__, client_ctx,
 			*kernel_vaddr);
 		mutex_unlock(&client_ctx->enrty_queue_lock);
@@ -638,9 +637,8 @@ u32 vidc_insert_addr_table(struct video_client_ctx *client_ctx,
 	unsigned long len, phys_addr;
 	struct file *file = NULL;
 	u32 *num_of_buffers = NULL;
-	u32 i, flags;
+	u32 i;
 	struct buf_addr_table *buf_addr_table;
-	struct msm_mapped_buffer *mapped_buffer = NULL;
 	struct ion_handle *buff_ion_handle = NULL;
 	unsigned long ionflag = 0;
 	unsigned long iova = 0;
@@ -694,32 +692,14 @@ u32 vidc_insert_addr_table(struct video_client_ctx *client_ctx,
 		user_vaddr != buf_addr_table[i].user_vaddr)
 		i++;
 	if (i < *num_of_buffers) {
-		DBG("%s() : client_ctx = %p."
+		DBG("%s() : client_ctx = %pK."
 			" user_virt_addr = 0x%08lx already set",
 			__func__, client_ctx, user_vaddr);
 		goto bail_out_add;
 	} else {
 		if (!vcd_get_ion_status()) {
-			if (get_pmem_file(pmem_fd, &phys_addr,
-					kernel_vaddr, &len, &file)) {
-				ERR("%s(): get_pmem_file failed\n", __func__);
-				goto bail_out_add;
-			}
-			put_pmem_file(file);
-			flags = (buffer == BUFFER_TYPE_INPUT)
-			? MSM_SUBSYSTEM_MAP_IOVA :
-			MSM_SUBSYSTEM_MAP_IOVA|MSM_SUBSYSTEM_ALIGN_IOVA_8K;
-			mapped_buffer = msm_subsystem_map_buffer(phys_addr,
-			mapped_length, flags, vidc_mmu_subsystem,
-			sizeof(vidc_mmu_subsystem)/sizeof(unsigned int));
-			if (IS_ERR(mapped_buffer)) {
-				pr_err("buffer map failed");
-				goto bail_out_add;
-			}
-			buf_addr_table[*num_of_buffers].client_data = (void *)
-				mapped_buffer;
-			buf_addr_table[*num_of_buffers].dev_addr =
-				mapped_buffer->iova[0];
+			pr_err("PMEM not available\n");
+			return false;
 		} else {
 			buff_ion_handle = ion_import_dma_buf(
 				client_ctx->user_ion_client, pmem_fd);
@@ -786,7 +766,7 @@ u32 vidc_insert_addr_table(struct video_client_ctx *client_ctx,
 		buf_addr_table[*num_of_buffers].buff_ion_flag =
 						ionflag;
 		*num_of_buffers = *num_of_buffers + 1;
-		DBG("%s() : client_ctx = %p, user_virt_addr = 0x%08lx, "
+		DBG("%s() : client_ctx = %pK, user_virt_addr = 0x%08lx, "
 			"kernel_vaddr = 0x%08lx phys_addr=%lu inserted!",
 			__func__, client_ctx, user_vaddr, *kernel_vaddr,
 			phys_addr);
@@ -845,7 +825,7 @@ u32 vidc_insert_addr_table_kernel(struct video_client_ctx *client_ctx,
 		i++;
 	}
 	if (i < *num_of_buffers) {
-		DBG("%s() : client_ctx = %p."
+		DBG("%s() : client_ctx = %pK."
 			" user_virt_addr = 0x%08lx already set",
 			__func__, client_ctx, user_vaddr);
 		goto bail_out_add;
@@ -862,7 +842,7 @@ u32 vidc_insert_addr_table_kernel(struct video_client_ctx *client_ctx,
 		buf_addr_table[*num_of_buffers].phy_addr = phys_addr;
 		buf_addr_table[*num_of_buffers].buff_ion_handle = NULL;
 		*num_of_buffers = *num_of_buffers + 1;
-		DBG("%s() : client_ctx = %p, user_virt_addr = 0x%08lx, "
+		DBG("%s() : client_ctx = %pK, user_virt_addr = 0x%08lx, "
 			"kernel_vaddr = 0x%08lx inserted!", __func__,
 			client_ctx, user_vaddr, kernel_vaddr);
 	}
@@ -903,7 +883,7 @@ u32 vidc_delete_addr_table(struct video_client_ctx *client_ctx,
 		user_vaddr != buf_addr_table[i].user_vaddr)
 		i++;
 	if (i == *num_of_buffers) {
-		pr_err("%s() : client_ctx = %p."
+		pr_err("%s() : client_ctx = %pK."
 			" user_virt_addr = 0x%08lx NOT found",
 			__func__, client_ctx, user_vaddr);
 		goto bail_out_del;
@@ -947,7 +927,7 @@ u32 vidc_delete_addr_table(struct video_client_ctx *client_ctx,
 			buf_addr_table[*num_of_buffers - 1].buff_ion_handle;
 	}
 	*num_of_buffers = *num_of_buffers - 1;
-	DBG("%s() : client_ctx = %p."
+	DBG("%s() : client_ctx = %pK."
 		" user_virt_addr = 0x%08lx is found and deleted",
 		__func__, client_ctx, user_vaddr);
 	mutex_unlock(&client_ctx->enrty_queue_lock);

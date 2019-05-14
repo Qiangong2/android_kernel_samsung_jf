@@ -1,6 +1,6 @@
 /* Copyright (C) 2008 Google, Inc.
  * Copyright (C) 2008 HTC Corporation
- * Copyright (c) 2009-2013, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2009-2015, The Linux Foundation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -140,7 +140,10 @@ static int audio_aio_ion_lookup_vaddr(struct q6audio_aio *audio, void *addr,
 	list_for_each_entry(region_elt, &audio->ion_region_queue, list) {
 		if (addr >= region_elt->vaddr &&
 			addr < region_elt->vaddr + region_elt->len &&
-			addr + len <= region_elt->vaddr + region_elt->len) {
+			addr + len <= region_elt->vaddr + region_elt->len &&
+			addr+len > addr) {
+			/* to avoid integer addition overflow */
+
 			/* offset since we could pass vaddr inside a registerd
 			* ion buffer
 			*/
@@ -453,11 +456,11 @@ static void audio_aio_unmap_ion_region(struct q6audio_aio *audio)
 	pr_debug("%s[%p]:\n", __func__, audio);
 	list_for_each_safe(ptr, next, &audio->ion_region_queue) {
 		region = list_entry(ptr, struct audio_aio_ion_region, list);
-		pr_debug("%s[%p]: phy_address = 0x%lx\n",
-				__func__, audio, region->paddr);
 		if (region != NULL) {
+			pr_debug("%s[%p]: phy_address = 0x%lx\n",
+				__func__, audio, region->paddr);
 			rc = q6asm_memory_unmap(audio->ac,
-						(uint32_t)region->paddr, IN);
+					(uint32_t)region->paddr, IN);
 			if (rc < 0)
 				pr_err("%s[%p]: memory unmap failed\n",
 					__func__, audio);
@@ -470,6 +473,8 @@ int audio_aio_release(struct inode *inode, struct file *file)
 	struct q6audio_aio *audio = file->private_data;
 	pr_debug("%s[%p]\n", __func__, audio);
 	mutex_lock(&audio->lock);
+	mutex_lock(&audio->read_lock);
+	mutex_lock(&audio->write_lock);
 	audio->wflush = 1;
 	if (audio->enabled)
 		audio_aio_flush(audio);
@@ -485,6 +490,8 @@ int audio_aio_release(struct inode *inode, struct file *file)
 	wake_up(&audio->event_wait);
 	audio_aio_reset_event_queue(audio);
 	q6asm_audio_client_free(audio->ac);
+	mutex_unlock(&audio->write_lock);
+	mutex_unlock(&audio->read_lock);
 	mutex_unlock(&audio->lock);
 	mutex_destroy(&audio->lock);
 	mutex_destroy(&audio->read_lock);
@@ -585,7 +592,7 @@ static long audio_aio_process_event_req(struct q6audio_aio *audio,
 	struct audio_aio_event *drv_evt = NULL;
 	int timeout;
 	unsigned long flags;
-
+	memset(&usr_evt, 0, sizeof(struct msm_audio_event));
 	if (copy_from_user(&usr_evt, arg, sizeof(struct msm_audio_event)))
 		return -EFAULT;
 
@@ -603,8 +610,12 @@ static long audio_aio_process_event_req(struct q6audio_aio *audio,
 		rc = wait_event_interruptible(audio->event_wait,
 		audio_aio_events_pending(audio));
 	}
-	if (rc < 0)
+
+	if (rc < 0) {
+		pr_err("%s: audio process event failed, rc = %ld",
+			__func__, rc);
 		return rc;
+	}
 
 	if (audio->event_abort) {
 		audio->event_abort = 0;
@@ -1243,8 +1254,13 @@ long audio_aio_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		mutex_lock(&audio->lock);
 		if (copy_from_user(&info, (void *)arg, sizeof(info)))
 			rc = -EFAULT;
-		else
+		else {
+			mutex_lock(&audio->read_lock);
+			mutex_lock(&audio->write_lock);
 			rc = audio_aio_ion_add(audio, &info);
+			mutex_unlock(&audio->write_lock);
+			mutex_unlock(&audio->read_lock);
+		}
 		mutex_unlock(&audio->lock);
 		break;
 	}
@@ -1254,8 +1270,13 @@ long audio_aio_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		pr_debug("%s[%p]:AUDIO_DEREGISTER_ION\n", __func__, audio);
 		if (copy_from_user(&info, (void *)arg, sizeof(info)))
 			rc = -EFAULT;
-		else
+		else {
+			mutex_lock(&audio->read_lock);
+			mutex_lock(&audio->write_lock);
 			rc = audio_aio_ion_remove(audio, &info);
+			mutex_unlock(&audio->write_lock);
+			mutex_unlock(&audio->read_lock);
+		}
 		mutex_unlock(&audio->lock);
 		break;
 	}

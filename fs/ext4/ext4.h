@@ -26,9 +26,11 @@
 #include <linux/seqlock.h>
 #include <linux/mutex.h>
 #include <linux/timer.h>
+#include <linux/version.h>
 #include <linux/wait.h>
 #include <linux/blockgroup_lock.h>
 #include <linux/percpu_counter.h>
+#include <crypto/hash.h>
 #ifdef __KERNEL__
 #include <linux/compat.h>
 #endif
@@ -298,7 +300,9 @@ struct ext4_group_desc
 	__le16	bg_free_inodes_count_lo;/* Free inodes count */
 	__le16	bg_used_dirs_count_lo;	/* Directories count */
 	__le16	bg_flags;		/* EXT4_BG_flags (INODE_UNINIT, etc) */
-	__u32	bg_reserved[2];		/* Likely block/inode bitmap checksum */
+	__le32  bg_exclude_bitmap_lo;   /* Exclude bitmap for snapshots */
+	__le16  bg_block_bitmap_csum_lo;/* crc32c(s_uuid+grp_num+bbitmap) LE */
+	__le16  bg_inode_bitmap_csum_lo;/* crc32c(s_uuid+grp_num+ibitmap) LE */
 	__le16  bg_itable_unused_lo;	/* Unused inodes count */
 	__le16  bg_checksum;		/* crc16(sb_uuid+group+desc) */
 	__le32	bg_block_bitmap_hi;	/* Blocks bitmap block MSB */
@@ -308,8 +312,18 @@ struct ext4_group_desc
 	__le16	bg_free_inodes_count_hi;/* Free inodes count MSB */
 	__le16	bg_used_dirs_count_hi;	/* Directories count MSB */
 	__le16  bg_itable_unused_hi;    /* Unused inodes count MSB */
-	__u32	bg_reserved2[3];
+	__le32  bg_exclude_bitmap_hi;   /* Exclude bitmap block MSB */
+	__le16  bg_block_bitmap_csum_hi;/* crc32c(s_uuid+grp_num+bbitmap) BE */
+	__le16  bg_inode_bitmap_csum_hi;/* crc32c(s_uuid+grp_num+ibitmap) BE */
+	__u32   bg_reserved;
 };
+
+#define EXT4_BG_INODE_BITMAP_CSUM_HI_END	\
+	(offsetof(struct ext4_group_desc, bg_inode_bitmap_csum_hi) + \
+	 sizeof(__le16))
+#define EXT4_BG_BLOCK_BITMAP_CSUM_HI_END	\
+	(offsetof(struct ext4_group_desc, bg_block_bitmap_csum_hi) + \
+	 sizeof(__le16))
 
 /*
  * Structure of a flex block group info
@@ -650,7 +664,8 @@ struct ext4_inode {
 			__le16	l_i_file_acl_high;
 			__le16	l_i_uid_high;	/* these 2 fields */
 			__le16	l_i_gid_high;	/* were reserved2[0] */
-			__u32	l_i_reserved2;
+			__le16	l_i_checksum_lo;/* crc32c(uuid+inum+inode) LE */
+			__le16	l_i_reserved;
 		} linux2;
 		struct {
 			__le16	h_i_reserved1;	/* Obsoleted fragment number/size which are removed in ext4 */
@@ -666,7 +681,7 @@ struct ext4_inode {
 		} masix2;
 	} osd2;				/* OS dependent 2 */
 	__le16	i_extra_isize;
-	__le16	i_pad1;
+	__le16	i_checksum_hi;	/* crc32c(uuid+inum+inode) BE */
 	__le32  i_ctime_extra;  /* extra Change time      (nsec << 2 | epoch) */
 	__le32  i_mtime_extra;  /* extra Modification time(nsec << 2 | epoch) */
 	__le32  i_atime_extra;  /* extra Access time      (nsec << 2 | epoch) */
@@ -704,19 +719,55 @@ struct move_extent {
 	<= (EXT4_GOOD_OLD_INODE_SIZE +			\
 	    (einode)->i_extra_isize))			\
 
+/*
+ * We use an encoding that preserves the times for extra epoch "00":
+ *
+ * extra  msb of                         adjust for signed
+ * epoch  32-bit                         32-bit tv_sec to
+ * bits   time    decoded 64-bit tv_sec  64-bit tv_sec      valid time range
+ * 0 0    1    -0x80000000..-0x00000001  0x000000000 1901-12-13..1969-12-31
+ * 0 0    0    0x000000000..0x07fffffff  0x000000000 1970-01-01..2038-01-19
+ * 0 1    1    0x080000000..0x0ffffffff  0x100000000 2038-01-19..2106-02-07
+ * 0 1    0    0x100000000..0x17fffffff  0x100000000 2106-02-07..2174-02-25
+ * 1 0    1    0x180000000..0x1ffffffff  0x200000000 2174-02-25..2242-03-16
+ * 1 0    0    0x200000000..0x27fffffff  0x200000000 2242-03-16..2310-04-04
+ * 1 1    1    0x280000000..0x2ffffffff  0x300000000 2310-04-04..2378-04-22
+ * 1 1    0    0x300000000..0x37fffffff  0x300000000 2378-04-22..2446-05-10
+ *
+ * Note that previous versions of the kernel on 64-bit systems would
+ * incorrectly use extra epoch bits 1,1 for dates between 1901 and
+ * 1970.  e2fsck will correct this, assuming that it is run on the
+ * affected filesystem before 2242.
+ */
+
 static inline __le32 ext4_encode_extra_time(struct timespec *time)
 {
-       return cpu_to_le32((sizeof(time->tv_sec) > 4 ?
-			   (time->tv_sec >> 32) & EXT4_EPOCH_MASK : 0) |
-                          ((time->tv_nsec << EXT4_EPOCH_BITS) & EXT4_NSEC_MASK));
+	u32 extra = sizeof(time->tv_sec) > 4 ?
+		((time->tv_sec - (s32)time->tv_sec) >> 32) & EXT4_EPOCH_MASK : 0;
+	return cpu_to_le32(extra | (time->tv_nsec << EXT4_EPOCH_BITS));
 }
 
 static inline void ext4_decode_extra_time(struct timespec *time, __le32 extra)
 {
-       if (sizeof(time->tv_sec) > 4)
-	       time->tv_sec |= (__u64)(le32_to_cpu(extra) & EXT4_EPOCH_MASK)
-			       << 32;
-       time->tv_nsec = (le32_to_cpu(extra) & EXT4_NSEC_MASK) >> EXT4_EPOCH_BITS;
+	if (unlikely(sizeof(time->tv_sec) > 4 &&
+			(extra & cpu_to_le32(EXT4_EPOCH_MASK)))) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,20,0)
+		/* Handle legacy encoding of pre-1970 dates with epoch
+		 * bits 1,1.  We assume that by kernel version 4.20,
+		 * everyone will have run fsck over the affected
+		 * filesystems to correct the problem.  (This
+		 * backwards compatibility may be removed before this
+		 * time, at the discretion of the ext4 developers.)
+		 */
+		u64 extra_bits = le32_to_cpu(extra) & EXT4_EPOCH_MASK;
+		if (extra_bits == 3 && ((time->tv_sec) & 0x80000000) != 0)
+			extra_bits = 0;
+		time->tv_sec += extra_bits << 32;
+#else
+		time->tv_sec += (u64)(le32_to_cpu(extra) & EXT4_EPOCH_MASK) << 32;
+#endif
+	}
+	time->tv_nsec = (le32_to_cpu(extra) & EXT4_NSEC_MASK) >> EXT4_EPOCH_BITS;
 }
 
 #define EXT4_INODE_SET_XTIME(xtime, inode, raw_inode)			       \
@@ -770,7 +821,7 @@ do {									       \
 #define i_gid_low	i_gid
 #define i_uid_high	osd2.linux2.l_i_uid_high
 #define i_gid_high	osd2.linux2.l_i_gid_high
-#define i_reserved2	osd2.linux2.l_i_reserved2
+#define i_checksum_lo	osd2.linux2.l_i_checksum_lo
 
 #elif defined(__GNU__)
 
@@ -910,6 +961,9 @@ struct ext4_inode_info {
 	 */
 	tid_t i_sync_tid;
 	tid_t i_datasync_tid;
+
+	/* Precomputed uuid+inum+igen checksum for seeding inode checksums */
+	__u32 i_csum_seed;
 };
 
 /*
@@ -1003,6 +1057,9 @@ extern void ext4_set_bits(void *bm, int cur, int len);
 #define EXT4_ERRORS_PANIC		3	/* Panic */
 #define EXT4_ERRORS_DEFAULT		EXT4_ERRORS_CONTINUE
 
+/* Metadata checksum algorithm codes */
+#define EXT4_CRC32C_CHKSUM		1
+
 /*
  * Structure of the super block
  */
@@ -1089,7 +1146,7 @@ struct ext4_super_block {
 	__le64  s_mmp_block;            /* Block for multi-mount protection */
 	__le32  s_raid_stripe_width;    /* blocks on all data disks (N*stride)*/
 	__u8	s_log_groups_per_flex;  /* FLEX_BG group size */
-	__u8	s_reserved_char_pad;
+	__u8	s_checksum_type;	/* metadata checksum algorithm used */
 	__le16  s_reserved_pad;
 	__le64	s_kbytes_written;	/* nr of lifetime kilobytes written */
 	__le32	s_snapshot_inum;	/* Inode number of active snapshot */
@@ -1115,7 +1172,8 @@ struct ext4_super_block {
 	__le32	s_usr_quota_inum;	/* inode for tracking user quota */
 	__le32	s_grp_quota_inum;	/* inode for tracking group quota */
 	__le32	s_overhead_clusters;	/* overhead blocks/clusters in fs */
-	__le32  s_reserved[109];        /* Padding to the end of the block */
+	__le32	s_reserved[108];	/* Padding to the end of the block */
+	__le32	s_checksum;		/* crc32c(superblock) */
 };
 
 #define EXT4_S_ERR_LEN (EXT4_S_ERR_END - EXT4_S_ERR_START)
@@ -1267,6 +1325,12 @@ struct ext4_sb_info {
 
 	/* record the last minlen when FITRIM is called. */
 	atomic_t s_last_trim_minblks;
+
+	/* Reference to checksum algorithm driver via cryptoapi */
+	struct crypto_shash *s_chksum_driver;
+
+	/* Precomputed FS UUID checksum for seeding other checksums */
+	__u32 s_csum_seed;
 };
 
 static inline struct ext4_sb_info *EXT4_SB(struct super_block *sb)
@@ -1287,8 +1351,6 @@ static inline struct timespec ext4_current_time(struct inode *inode)
 static inline int ext4_valid_inum(struct super_block *sb, unsigned long ino)
 {
 	return ino == EXT4_ROOT_INO ||
-		ino == EXT4_JOURNAL_INO ||
-		ino == EXT4_RESIZE_INO ||
 		(ino >= EXT4_FIRST_INO(sb) &&
 		 ino <= le32_to_cpu(EXT4_SB(sb)->s_es->s_inodes_count));
 }
@@ -1415,6 +1477,12 @@ static inline void ext4_clear_state_flags(struct ext4_inode_info *ei)
 #define EXT4_FEATURE_RO_COMPAT_EXTRA_ISIZE	0x0040
 #define EXT4_FEATURE_RO_COMPAT_QUOTA		0x0100
 #define EXT4_FEATURE_RO_COMPAT_BIGALLOC		0x0200
+/*
+ * METADATA_CSUM also enables group descriptor checksums (GDT_CSUM).  When
+ * METADATA_CSUM is set, group descriptor checksums use the same algorithm as
+ * all other data structures' checksums.  However, the METADATA_CSUM and
+ * GDT_CSUM bits are mutually exclusive.
+ */
 #define EXT4_FEATURE_RO_COMPAT_METADATA_CSUM	0x0400
 
 #define EXT4_FEATURE_INCOMPAT_COMPRESSION	0x0001
@@ -1528,6 +1596,18 @@ struct ext4_dir_entry_2 {
 };
 
 /*
+ * This is a bogus directory entry at the end of each leaf block that
+ * records checksums.
+ */
+struct ext4_dir_entry_tail {
+	__le32	det_reserved_zero1;	/* Pretend to be unused */
+	__le16	det_rec_len;		/* 12 */
+	__u8	det_reserved_zero2;	/* Zero name length */
+	__u8	det_reserved_ft;	/* 0xDE, fake file type */
+	__le32	det_checksum;		/* crc32c(uuid+inum+dirblock) */
+};
+
+/*
  * Ext4 directory file types.  Only the low 3 bits are used.  The
  * other bits are reserved for now.
  */
@@ -1541,6 +1621,8 @@ struct ext4_dir_entry_2 {
 #define EXT4_FT_SYMLINK		7
 
 #define EXT4_FT_MAX		8
+
+#define EXT4_FT_DIR_CSUM	0xDE
 
 /*
  * EXT4_DIR_PAD defines the directory entries boundaries
@@ -1609,6 +1691,25 @@ static inline __le16 ext4_rec_len_to_disk(unsigned len, unsigned blocksize)
 #define DX_HASH_LEGACY_UNSIGNED	3
 #define DX_HASH_HALF_MD4_UNSIGNED	4
 #define DX_HASH_TEA_UNSIGNED		5
+
+static inline u32 ext4_chksum(struct ext4_sb_info *sbi, u32 crc,
+			      const void *address, unsigned int length)
+{
+	struct {
+		struct shash_desc shash;
+		char ctx[crypto_shash_descsize(sbi->s_chksum_driver)];
+	} desc;
+	int err;
+
+	desc.shash.tfm = sbi->s_chksum_driver;
+	desc.shash.flags = 0;
+	*(u32 *)desc.ctx = crc;
+
+	err = crypto_shash_update(&desc.shash, address, length);
+	BUG_ON(err);
+
+	return *(u32 *)desc.ctx;
+}
 
 #ifdef __KERNEL__
 
@@ -1742,7 +1843,8 @@ struct mmp_struct {
 	__le16	mmp_check_interval;
 
 	__le16	mmp_pad1;
-	__le32	mmp_pad2[227];
+	__le32	mmp_pad2[226];
+	__le32	mmp_checksum;		/* crc32c(uuid+mmp_block) */
 };
 
 /* arguments passed to the mmp thread */
@@ -1785,8 +1887,24 @@ struct mmpd_data {
 
 /* bitmap.c */
 extern unsigned int ext4_count_free(char *bitmap, unsigned numchars);
+void ext4_inode_bitmap_csum_set(struct super_block *sb, ext4_group_t group,
+				struct ext4_group_desc *gdp,
+				struct buffer_head *bh, int sz);
+int ext4_inode_bitmap_csum_verify(struct super_block *sb, ext4_group_t group,
+				  struct ext4_group_desc *gdp,
+				  struct buffer_head *bh, int sz);
+void ext4_block_bitmap_csum_set(struct super_block *sb, ext4_group_t group,
+				struct ext4_group_desc *gdp,
+				struct buffer_head *bh);
+int ext4_block_bitmap_csum_verify(struct super_block *sb, ext4_group_t group,
+				  struct ext4_group_desc *gdp,
+				  struct buffer_head *bh);
 
 /* balloc.c */
+extern void ext4_validate_block_bitmap(struct super_block *sb,
+				       struct ext4_group_desc *desc,
+				       unsigned int block_group,
+				       struct buffer_head *bh);
 extern unsigned int ext4_block_group(struct super_block *sb,
 			ext4_fsblk_t blocknr);
 extern ext4_grpblk_t ext4_block_group_offset(struct super_block *sb,
@@ -1815,10 +1933,6 @@ extern int ext4_wait_block_bitmap(struct super_block *sb,
 				  struct buffer_head *bh);
 extern struct buffer_head *ext4_read_block_bitmap(struct super_block *sb,
 						  ext4_group_t block_group);
-extern void ext4_init_block_bitmap(struct super_block *sb,
-				   struct buffer_head *bh,
-				   ext4_group_t group,
-				   struct ext4_group_desc *desc);
 extern unsigned ext4_free_clusters_after_init(struct super_block *sb,
 					      ext4_group_t block_group,
 					      struct ext4_group_desc *gdp);
@@ -1954,6 +2068,10 @@ extern int ext4_resize_fs(struct super_block *sb, ext4_fsblk_t n_blocks_count);
 
 /* super.c */
 extern int ext4_calculate_overhead(struct super_block *sb);
+extern int ext4_superblock_csum_verify(struct super_block *sb,
+				       struct ext4_super_block *es);
+extern void ext4_superblock_csum_set(struct super_block *sb,
+				     struct ext4_super_block *es);
 extern void *ext4_kvmalloc(size_t size, gfp_t flags);
 extern void *ext4_kvzalloc(size_t size, gfp_t flags);
 extern void ext4_kvfree(void *ptr);
@@ -2029,15 +2147,21 @@ extern void ext4_used_dirs_set(struct super_block *sb,
 				struct ext4_group_desc *bg, __u32 count);
 extern void ext4_itable_unused_set(struct super_block *sb,
 				   struct ext4_group_desc *bg, __u32 count);
-extern __le16 ext4_group_desc_csum(struct ext4_sb_info *sbi, __u32 group,
-				   struct ext4_group_desc *gdp);
-extern int ext4_group_desc_csum_verify(struct ext4_sb_info *sbi, __u32 group,
+extern int ext4_group_desc_csum_verify(struct super_block *sb, __u32 group,
 				       struct ext4_group_desc *gdp);
+extern void ext4_group_desc_csum_set(struct super_block *sb, __u32 group,
+				     struct ext4_group_desc *gdp);
 extern void print_bh(struct super_block *sb,
 			struct buffer_head *bh, int start, int len);
 extern void print_block_data(struct super_block *sb, sector_t blocknr,
 			unsigned char *data_to_dump, int start, int len);
 
+static inline int ext4_has_group_desc_csum(struct super_block *sb)
+{
+	return EXT4_HAS_RO_COMPAT_FEATURE(sb,
+					  EXT4_FEATURE_RO_COMPAT_GDT_CSUM |
+					  EXT4_FEATURE_RO_COMPAT_METADATA_CSUM);
+}
 
 static inline ext4_fsblk_t ext4_blocks_count(struct ext4_super_block *es)
 {
@@ -2234,6 +2358,9 @@ static inline void ext4_unlock_group(struct super_block *sb,
 
 static inline void ext4_mark_super_dirty(struct super_block *sb)
 {
+	struct ext4_super_block *es = EXT4_SB(sb)->s_es;
+
+	ext4_superblock_csum_set(sb, es);
 	if (EXT4_SB(sb)->s_journal == NULL)
 		sb->s_dirt =1;
 }

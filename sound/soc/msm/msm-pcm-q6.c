@@ -422,6 +422,19 @@ static int msm_pcm_open(struct snd_pcm_substream *substream)
 		}
 	}
 
+	ret = snd_pcm_hw_constraint_step(runtime, 0,
+		SNDRV_PCM_HW_PARAM_PERIOD_BYTES, 32);
+	if (ret < 0) {
+		pr_err("constraint for period bytes step ret = %d\n",
+								ret);
+	}
+	ret = snd_pcm_hw_constraint_step(runtime, 0,
+		SNDRV_PCM_HW_PARAM_BUFFER_BYTES, 32);
+	if (ret < 0) {
+		pr_err("constraint for buffer bytes step ret = %d\n",
+								ret);
+	}
+
 	prtd->dsp_cnt = 0;
 	runtime->private_data = prtd;
 
@@ -749,7 +762,7 @@ static int msm_pcm_hw_params(struct snd_pcm_substream *substream,
 	if (buf == NULL || buf[0].data == NULL)
 		return -ENOMEM;
 
-	pr_debug("%s:buf = %p\n", __func__, buf);
+	pr_debug("%s:buf = %pK\n", __func__, buf);
 	dma_buf->dev.type = SNDRV_DMA_TYPE_DEV;
 	dma_buf->dev.dev = substream->pcm->card->dev;
 	dma_buf->private_data = NULL;

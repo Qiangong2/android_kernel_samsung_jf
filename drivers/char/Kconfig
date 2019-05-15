@@ -28,6 +28,15 @@ config DEVKMEM
 	  kind of kernel debugging operations.
 	  When in doubt, say "N".
 
+config FRANDOM
+	bool "/dev/frandom device support"
+	default y
+	help
+	  Say Y here if you want to support the /dev/frandom device. Frandom
+	  is a Linux kernel random number generator, which is 10-50 times faster 
+	  than what you get from Linux' built-in /dev/urandom.
+	  When in doubt, say "N"
+
 config STALDRV
 	bool "Stallion multiport serial support"
 	depends on SERIAL_NONSTANDARD
@@ -633,7 +642,7 @@ config TILE_SROM
 
 config MSM_ROTATOR
         tristate "MSM Offline Image Rotator Driver"
-        depends on (ARCH_MSM7X30 || ARCH_MSM8X60 || ARCH_MSM8960) && ANDROID_PMEM
+        depends on (ARCH_MSM7X30 || ARCH_MSM8X60 || ARCH_MSM8960)
         default y
         help
           This driver provides support for the image rotator HW block in the

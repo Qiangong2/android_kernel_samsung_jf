@@ -25,7 +25,7 @@
 #include <linux/uaccess.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
-#include <linux/android_pmem.h>
+
 #include <linux/clk.h>
 #include <mach/msm_subsystem_map.h>
 #include <media/msm/vidc_type.h>
@@ -41,9 +41,6 @@
 #endif
 
 #define ERR(x...) printk(KERN_ERR x)
-static unsigned int vidc_mmu_subsystem[] = {
-	MSM_SUBSYSTEM_VIDEO};
-
 
 u32 vid_enc_set_get_base_cfg(struct video_client_ctx *client_ctx,
 		struct venc_basecfg *base_config, u32 set_flag)
@@ -1479,7 +1476,7 @@ u32 vid_enc_start_stop(struct video_client_ctx *client_ctx, u32 start)
 		__func__, vcd_status);
 			return false;
 		}
-		DBG("Send STOP_DONE message to client = %p\n",
+		DBG("Send STOP_DONE message to client = %pK\n",
 				client_ctx);
 	}
 	return true;
@@ -1493,11 +1490,11 @@ u32 vid_enc_pause_resume(struct video_client_ctx *client_ctx, u32 pause)
 		return false;
 
 	if (pause) {
-		DBG("PAUSE command from client = %p\n",
+		DBG("PAUSE command from client = %pK\n",
 				client_ctx);
 		vcd_status = vcd_pause(client_ctx->vcd_handle);
 	} else {
-		DBG("Resume command from client = %p\n",
+		DBG("Resume command from client = %pK\n",
 				client_ctx);
 		vcd_status = vcd_resume(client_ctx->vcd_handle);
 	}
@@ -1642,7 +1639,7 @@ u32 vid_enc_set_buffer(struct video_client_ctx *client_ctx,
 					buffer_info->fd,
 					(unsigned long)buffer_info->offset,
 					VID_ENC_MAX_NUM_OF_BUFF, length)) {
-		DBG("%s() : user_virt_addr = %p cannot be set.",
+		DBG("%s() : user_virt_addr = %pK cannot be set.",
 		    __func__, buffer_info->pbuffer);
 		return false;
 	}
@@ -1718,7 +1715,7 @@ u32 vid_enc_free_buffer(struct video_client_ctx *client_ctx,
 				true, &user_vaddr, &kernel_vaddr,
 				&phy_addr, &pmem_fd, &file,
 				&buffer_index)) {
-		ERR("%s(): WNG: user_virt_addr = %p has not been set",
+		ERR("%s(): WNG: user_virt_addr = %pK has not been set",
 		    __func__, buffer_info->pbuffer);
 		return true;
 	}
@@ -1734,7 +1731,7 @@ u32 vid_enc_free_buffer(struct video_client_ctx *client_ctx,
 	if (!vidc_delete_addr_table(client_ctx, dir_buffer,
 				(unsigned long)buffer_info->pbuffer,
 				&kernel_vaddr)) {
-		ERR("%s(): WNG: user_virt_addr = %p has not been set.",
+		ERR("%s(): WNG: user_virt_addr = %pK has not been set.",
 		    __func__, buffer_info->pbuffer);
 		return true;
 	}
@@ -1879,11 +1876,9 @@ u32 vid_enc_set_recon_buffers(struct video_client_ctx *client_ctx,
 		struct venc_recon_addr *venc_recon)
 {
 	u32 vcd_status = VCD_ERR_FAIL;
-	u32 len, i, flags = 0;
-	struct file *file;
+	u32 len, i;
 	struct vcd_property_hdr vcd_property_hdr;
 	struct vcd_property_enc_recon_buffer *control = NULL;
-	struct msm_mapped_buffer *mapped_buffer = NULL;
 	int rc = -1;
 	unsigned long ionflag = 0;
 	unsigned long iova = 0;
@@ -1915,25 +1910,8 @@ u32 vid_enc_set_recon_buffers(struct video_client_ctx *client_ctx,
 	control->user_virtual_addr = venc_recon->pbuffer;
 
 	if (!vcd_get_ion_status()) {
-		if (get_pmem_file(control->pmem_fd, (unsigned long *)
-			(&(control->physical_addr)), (unsigned long *)
-			(&control->kernel_virtual_addr),
-			(unsigned long *) (&len), &file)) {
-				ERR("%s(): get_pmem_file failed\n", __func__);
-				return false;
-			}
-			put_pmem_file(file);
-			flags = MSM_SUBSYSTEM_MAP_IOVA;
-			mapped_buffer = msm_subsystem_map_buffer(
-			(unsigned long)control->physical_addr, len,
-			flags, vidc_mmu_subsystem,
-			sizeof(vidc_mmu_subsystem)/sizeof(unsigned int));
-			if (IS_ERR(mapped_buffer)) {
-				pr_err("buffer map failed");
-				return false;
-			}
-			control->client_data = (void *) mapped_buffer;
-			control->dev_addr = (u8 *)mapped_buffer->iova[0];
+		pr_err("PMEM not available\n");
+		return false;
 	} else {
 		client_ctx->recon_buffer_ion_handle[i] = ion_import_dma_buf(
 				client_ctx->user_ion_client, control->pmem_fd);
@@ -2034,7 +2012,7 @@ u32 vid_enc_free_recon_buffers(struct video_client_ctx *client_ctx,
 	}
 	len = sizeof(client_ctx->recon_buffer)/
 		sizeof(struct vcd_property_enc_recon_buffer);
-	pr_err(" %s() address  %p", __func__,
+	pr_err(" %s() address  %pK", __func__,
 	venc_recon->pbuffer);
 	for (i = 0; i < len; i++) {
 		if (client_ctx->recon_buffer[i].user_virtual_addr
@@ -2044,7 +2022,7 @@ u32 vid_enc_free_recon_buffers(struct video_client_ctx *client_ctx,
 		}
 	}
 	if (!control) {
-		pr_err(" %s() address not found %p", __func__,
+		pr_err(" %s() address not found %pK", __func__,
 			venc_recon->pbuffer);
 		return false;
 	}
